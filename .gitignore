@@ -1,0 +1,16 @@
+# ignorar la clave de firebase
+firestore-key.json
+
+# ignorar archivos de python no necesarios
+_pycache_/
+*.pyc
+*.pyo
+*.pyd
+
+# ignorar dependencias instaladas
+venv/
+.env
+
+# ignorar cache de editor
+.vscode/
+.idea/
