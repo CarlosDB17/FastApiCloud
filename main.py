@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Query
 from config import db  # importamos la conexion a firestore
 from pydantic import BaseModel, EmailStr, field_validator
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
@@ -31,34 +31,34 @@ def normalizar_texto(texto: str) -> str:
         c for c in unicodedata.normalize("NFD", texto.lower()) if unicodedata.category(c) != "Mn"
     )
 
-# funcion para validar el DNI español
-def validar_dni(dni: str) -> bool:
-    patron = r"^\d{8}[A-HJ-NP-TV-Z]$"
-    letras = "TRWAGMYFPDXBNJZSQVHLCKE"
-    if re.match(patron, dni):
-        numero = int(dni[:-1])
-        letra = dni[-1].upper()
-        return letras[numero % 23] == letra
-    return False
+
 
 # modelo de usuario con validaciones
 class Usuario(BaseModel):
     nombre: str
     email: EmailStr
-    dni: str
+    documento_identidad: str  # Campo genérico para DNI, pasaporte, NIE, etc.
     fecha_nacimiento: date
 
-    @field_validator("dni")
-    def validar_dni_espanol(cls, dni):
-        if not validar_dni(dni):
-            raise ValueError("El DNI no es válido")
-        return dni
+    @field_validator("documento_identidad")
+    def validar_documento_identidad(cls, documento_identidad):
+        if not re.match(r"^[a-zA-Z0-9]{6,15}$", documento_identidad):
+            raise ValueError("El documento de identidad debe ser alfanumérico y tener entre 6 y 15 caracteres")
+        return documento_identidad
 
-    @field_validator("fecha_nacimiento")
+    @field_validator("fecha_nacimiento", mode="before")  # Interceptar antes de la validación
+    @classmethod
     def validar_fecha_nacimiento(cls, fecha):
+        if isinstance(fecha, str):  # Convertir la cadena a `date` si es necesario
+            try:
+                fecha = datetime.strptime(fecha, "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError("Formato de fecha incorrecto. Debe ser YYYY-MM-DD")
+
         if fecha >= date.today():
             raise ValueError("La fecha de nacimiento no puede ser hoy ni en el futuro")
         return fecha
+    
 
 # modelo de usuario con datos opcionales para actualizacion parcial
 class UsuarioUpdate(BaseModel):
@@ -67,44 +67,52 @@ class UsuarioUpdate(BaseModel):
     fecha_nacimiento: Optional[date] = None
 
     @field_validator("fecha_nacimiento", mode="before")
+    @classmethod
     def validar_fecha_nacimiento(cls, fecha):
-        if fecha and fecha >= date.today():
-            raise ValueError("La fecha de nacimiento no puede ser hoy ni en el futuro")
+        if fecha:
+            if isinstance(fecha, str):
+                try:
+                    fecha = datetime.strptime(fecha, "%Y-%m-%d").date()
+                except ValueError:
+                    raise ValueError("Formato de fecha incorrecto. Debe ser YYYY-MM-DD")
+
+            if fecha >= date.today():
+                raise ValueError("La fecha de nacimiento no puede ser hoy ni en el futuro")
         return fecha
 
 # endpoint para registrar un nuevo usuario
 @app.post("/usuarios", response_model=dict)
 def registrar_usuario(usuario: Usuario):
-    usuario_ref = db.collection("usuarios").document(usuario.dni)
+    usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
-    # verificar si el usuario ya existe por DNI
+    # Verificar si el usuario ya existe por documento de identidad
     if usuario_ref.get().exists:
-        raise HTTPException(status_code=400, detail="Este DNI ya ha sido registrado")
+        raise HTTPException(status_code=400, detail="Este documento de identidad ya ha sido registrado")
 
-    # verificar si el email ya existe
+    # Verificar si el email ya existe
     email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
     if email_ref:
         raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
 
-    # convertir la fecha a string porque Firestore no admite el tipo date
+    # Convertir la fecha a string porque Firestore no admite el tipo date
     usuario_dict = usuario.model_dump()
     usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
 
-    # guardar el nombre normalizado (sin acentos y en minusculas) para mejorar busquedas
+    # Guardar el nombre normalizado (sin acentos y en minúsculas) para mejorar búsquedas
     usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
 
-    # guardar también el nombre en minusculas para consultas exactas sin mayusculas
+    # Guardar también el nombre en minúsculas para consultas exactas sin mayúsculas
     usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
 
-    # guardar en Firestore
+    # Guardar en Firestore
     usuario_ref.set(usuario_dict)
 
     return {"message": "Usuario registrado correctamente", "usuario": usuario_dict}
 
-# endpoint para obtener un usuario por su DNI
-@app.get("/usuarios/{dni}", response_model=Usuario)
-def obtener_usuario(dni: str):
-    usuario_doc = db.collection("usuarios").document(dni).get()
+# endpoint para obtener un usuario por su documento de identidad
+@app.get("/usuarios/{documento_identidad}", response_model=Usuario)
+def obtener_usuario(documento_identidad: str):
+    usuario_doc = db.collection("usuarios").document(documento_identidad).get()
 
     if not usuario_doc.exists:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -113,38 +121,39 @@ def obtener_usuario(dni: str):
     usuario_data["fecha_nacimiento"] = date.fromisoformat(usuario_data["fecha_nacimiento"])
     return Usuario(**usuario_data)
 
-# endpoint para actualizar un usuario por su DNI
-@app.patch("/usuarios/{dni}", response_model=dict)
-def actualizar_usuario_parcial(dni: str, usuario: UsuarioUpdate):
-    usuario_ref = db.collection("usuarios").document(dni)
+# endpoint para actualizar un usuario por su documento de identidad
+@app.patch("/usuarios/{documento_identidad}", response_model=dict)
+def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate):
+    usuario_ref = db.collection("usuarios").document(documento_identidad)
 
     if not usuario_ref.get().exists:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
-    update_data = usuario.model_dump(exclude_unset=True)  # excluir campos no enviados
+    # Verificar si el email ya existe en otro usuario
+    if usuario.email:
+        email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
+        for email_doc in email_ref:
+            if email_doc.id != documento_identidad:
+                raise HTTPException(status_code=400, detail="Este email ya ha sido registrado por otro usuario")
 
-    # si se envía "nombre", actualizar también las versiones normalizadas
+    update_data = usuario.model_dump(exclude_unset=True)  # Excluir campos no enviados
+
+    # Si se envía "nombre", actualizar también las versiones normalizadas
     if "nombre" in update_data:
         update_data["nombre_normalizado"] = normalizar_texto(update_data["nombre"])
         update_data["nombre_minusculas"] = update_data["nombre"].lower()
 
-    # si se envía "fecha_nacimiento", convertir a string
+    # Si se envía "fecha_nacimiento", convertir a string
     if "fecha_nacimiento" in update_data:
         update_data["fecha_nacimiento"] = update_data["fecha_nacimiento"].strftime("%Y-%m-%d")
 
-    # si se envía "email", verificar duplicados
-    if "email" in update_data:
-        email_ref = db.collection("usuarios").where("email", "==", update_data["email"]).get()
-        if email_ref:
-            raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
-
-    usuario_ref.update(update_data)  # solo actualiza los campos enviados
+    usuario_ref.update(update_data)  # Solo actualiza los campos enviados
     return {"message": "Usuario actualizado correctamente", "actualizado": update_data}
 
-# endpoint para eliminar un usuario por su DNI
-@app.delete("/usuarios/{dni}", response_model=dict)
-def eliminar_usuario(dni: str):
-    usuario_ref = db.collection("usuarios").document(dni)
+# endpoint para eliminar un usuario por su documento de identidad
+@app.delete("/usuarios/{documento_identidad}", response_model=dict)
+def eliminar_usuario(documento_identidad: str):
+    usuario_ref = db.collection("usuarios").document(documento_identidad)
 
     if not usuario_ref.get().exists:
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
@@ -194,9 +203,13 @@ def buscar_por_nombre(nombre: str):
 
         return usuarios
 
+    except HTTPException as http_exc:
+        # Re-lanzar excepciones HTTP ya controladas
+        raise http_exc
+
     except Exception as e:
-        # manejar errores de manera más clara
-        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+        # Manejar errores inesperados
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # endpoint para obtener todos los usuarios
 @app.get("/usuarios", response_model=List[Usuario])
