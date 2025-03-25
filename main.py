@@ -86,12 +86,12 @@ def registrar_usuario(usuario: Usuario):
 
     # verificar si el usuario ya existe por documento de identidad
     if usuario_ref.get().exists:
-        raise HTTPException(status_code=400, detail="este documento de identidad ya ha sido registrado")
+        raise HTTPException(status_code=400, detail="Este documento de identidad ya ha sido registrado")
 
     # verificar si el email ya existe
     email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
     if email_ref:
-        raise HTTPException(status_code=400, detail="este email ya ha sido registrado")
+        raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
 
     # convertir la fecha a string porque firestore no admite el tipo date
     usuario_dict = usuario.model_dump()
