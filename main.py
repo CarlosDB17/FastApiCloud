@@ -47,7 +47,7 @@ class Usuario(BaseModel):
     @field_validator("fecha_nacimiento", mode="before")  # interceptar antes de la validacion
     @classmethod
     def validar_fecha_nacimiento(cls, fecha):
-        if isinstance(fecha, str):  # convertir la cadena a `date` si es necesario
+        if isinstance(fecha, str):  # convertir la cadena a date si es necesario
             try:
                 fecha = datetime.strptime(fecha, "%Y-%m-%d").date()
             except ValueError:
@@ -82,6 +82,9 @@ class UsuarioUpdate(BaseModel):
 # endpoint para registrar un nuevo usuario
 @app.post("/usuarios", response_model=dict)
 def registrar_usuario(usuario: Usuario):
+    # convertir el documento de identidad a mayúsculas
+    usuario.documento_identidad = usuario.documento_identidad.upper()
+
     usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
     # verificar si el usuario ya existe por documento de identidad
@@ -89,7 +92,7 @@ def registrar_usuario(usuario: Usuario):
         raise HTTPException(status_code=400, detail="Este documento de identidad ya ha sido registrado")
 
     # verificar si el email ya existe
-    email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
+    email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
     if email_ref:
         raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
 
@@ -103,6 +106,12 @@ def registrar_usuario(usuario: Usuario):
     # guardar tambien el nombre en minusculas para consultas exactas sin mayusculas
     usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
 
+    # almacenar el email siempre en minúsculas
+    usuario_dict["email"] = usuario.email.lower()
+
+    # almacenar el documento de identidad siempre en mayusculas
+    usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+
     # guardar en firestore
     usuario_ref.set(usuario_dict)
 
@@ -111,6 +120,9 @@ def registrar_usuario(usuario: Usuario):
 # endpoint para obtener un usuario por su documento de identidad
 @app.get("/usuarios/{documento_identidad}", response_model=Usuario)
 def obtener_usuario(documento_identidad: str):
+    # convertir el documento de identidad recibido a mayúsculas
+    documento_identidad = documento_identidad.upper()
+
     usuario_doc = db.collection("usuarios").document(documento_identidad).get()
 
     if not usuario_doc.exists:
@@ -184,21 +196,32 @@ def eliminar_usuario(documento_identidad: str):
     usuario_ref.delete()
     return {"message": "usuario eliminado correctamente"}
 
-# endpoint para buscar usuarios por email
+# endpoint para buscar usuarios por email (búsqueda parcial)
 @app.get("/usuarios/email/{email}", response_model=List[Usuario])
 def buscar_por_email(email: str):
-    usuarios_ref = db.collection("usuarios").where("email", "==", email).stream()
-    usuarios = []
+    # convertir el email recibido a minúsculas
+    email = email.lower()
 
-    for user in usuarios_ref:
-        user_data = user.to_dict()
-        user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
-        usuarios.append(Usuario(**user_data))
+    try:
+        # buscar usuarios cuyo email contenga el valor buscado
+        usuarios_ref = db.collection("usuarios").stream()
+        usuarios = []
 
-    if not usuarios:
-        raise HTTPException(status_code=404, detail="no se encontraron usuarios con ese email")
+        for user in usuarios_ref:
+            user_data = user.to_dict()
+            user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
 
-    return usuarios
+            # comparar si el email contiene el valor buscado
+            if email in user_data.get("email", ""):
+                usuarios.append(Usuario(**user_data))
+
+        if not usuarios:
+            raise HTTPException(status_code=404, detail="no se encontraron usuarios con ese email")
+
+        return usuarios
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="error interno del servidor")
 
 # endpoint para buscar usuarios por nombre sin importar mayusculas ni acentos
 @app.get("/usuarios/nombre/{nombre}", response_model=List[Usuario])
@@ -227,12 +250,45 @@ def buscar_por_nombre(nombre: str):
         return usuarios
 
     except HTTPException as http_exc:
-        # re-lanzar excepciones http ya controladas
+        # relanzar excepciones http ya controladas
         raise http_exc
 
     except Exception as e:
         # manejar errores inesperados
         raise HTTPException(status_code=500, detail="error interno del servidor")
+
+# endpoint para buscar usuarios por documento de identidad (búsqueda parcial)
+@app.get("/usuarios/documento/{documento_identidad}", response_model=List[Usuario])
+def buscar_por_documento(documento_identidad: str):
+    # convertir el documento de identidad recibido a mayúsculas
+    documento_identidad = documento_identidad.upper()
+
+    try:
+        # buscar usuarios cuyo documento de identidad contenga el valor buscado
+        usuarios_ref = db.collection("usuarios").stream()
+        usuarios = []
+
+        for user in usuarios_ref:
+            user_data = user.to_dict()
+            user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
+
+            # comparar si el documento de identidad contiene el valor buscado
+            if documento_identidad in user_data.get("documento_identidad", ""):
+                usuarios.append(Usuario(**user_data))
+
+        # si no se encontraron usuarios lanzar un error 404
+        if not usuarios:
+            raise HTTPException(status_code=404, detail="No se encontraron usuarios con ese documento de identidad")
+
+        return usuarios
+
+    except HTTPException as http_exc:
+        # relanzar excepciones HTTP ya controladas
+        raise http_exc
+
+    except Exception as e:
+        # manejar errores inesperados
+        raise HTTPException(status_code=500, detail="Error interno del servidor")
 
 # endpoint para obtener todos los usuarios
 @app.get("/usuarios", response_model=List[Usuario])
