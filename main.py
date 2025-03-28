@@ -1,28 +1,34 @@
+import os
+import json
+import base64
 from fastapi import FastAPI, HTTPException, Query
-from config import db  # importamos la conexion a firestore
+from config import db  # Importamos la conexion a Firestore desde config.py
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import date, datetime
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi import Request
-
-import unicodedata
-import re  # para validar el dni
-
+from fastapi import Request, File, UploadFile
+from fastapi.staticfiles import StaticFiles
+from firebase_admin import storage  # Solo importa storage si lo necesitas
 
 app = FastAPI()
-
 
 # habilitar cors para permitir peticiones desde el frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # permitir cualquier origen
     allow_credentials=True,
-    allow_methods=["*"],  # permitir todos los metodos (get, post..)
+    allow_methods=["*"],  # permitir todos los métodos (GET, POST, etc.)
     allow_headers=["*"],  # permitir todos los encabezados
 )
+
+# montar el directorio 'uploads' para servir archivos estaticos
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+
+import unicodedata
+import re  # para validar el dni
 
 # funcion para normalizar texto (eliminar acentos y convertir a minusculas)
 def normalizar_texto(texto: str) -> str:
@@ -35,8 +41,9 @@ def normalizar_texto(texto: str) -> str:
 class Usuario(BaseModel):
     nombre: str
     email: EmailStr
-    documento_identidad: str  # campo generico para dni, pasaporte, nie, etc.
+    documento_identidad: str
     fecha_nacimiento: date
+    foto: Optional[str] = None  # Nuevo campo para almacenar la URL o nombre del archivo de la foto
 
     @field_validator("documento_identidad")
     def validar_documento_identidad(cls, documento_identidad):
@@ -64,6 +71,7 @@ class UsuarioUpdate(BaseModel):
     email: Optional[EmailStr] = None
     fecha_nacimiento: Optional[date] = None
     documento_identidad: Optional[str] = None
+    foto: Optional[str] = None  # Nuevo campo opcional para actualizar la foto
 
     @field_validator("fecha_nacimiento", mode="before")
     @classmethod
@@ -82,7 +90,7 @@ class UsuarioUpdate(BaseModel):
 # endpoint para registrar un nuevo usuario
 @app.post("/usuarios", response_model=dict)
 def registrar_usuario(usuario: Usuario):
-    # convertir el documento de identidad a mayúsculas
+    # convertir el documento de identidad a mayusculas
     usuario.documento_identidad = usuario.documento_identidad.upper()
 
     usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
@@ -106,11 +114,16 @@ def registrar_usuario(usuario: Usuario):
     # guardar tambien el nombre en minusculas para consultas exactas sin mayusculas
     usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
 
-    # almacenar el email siempre en minúsculas
+    # almacenar el email siempre en minusculas
     usuario_dict["email"] = usuario.email.lower()
 
     # almacenar el documento de identidad siempre en mayusculas
     usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+
+    # si se proporciona una foto, almacenarla
+    if usuario.foto:
+        usuario_dict["foto"] = usuario.foto
+
 
     # guardar en firestore
     usuario_ref.set(usuario_dict)
@@ -120,7 +133,7 @@ def registrar_usuario(usuario: Usuario):
 # endpoint para obtener un usuario por su documento de identidad
 @app.get("/usuarios/{documento_identidad}", response_model=Usuario)
 def obtener_usuario(documento_identidad: str):
-    # convertir el documento de identidad recibido a mayúsculas
+    # convertir el documento de identidad recibido a mayusculas
     documento_identidad = documento_identidad.upper()
 
     usuario_doc = db.collection("usuarios").document(documento_identidad).get()
@@ -182,6 +195,11 @@ def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate)
         if isinstance(update_data["fecha_nacimiento"], date):
             update_data["fecha_nacimiento"] = update_data["fecha_nacimiento"].strftime("%Y-%m-%d")
 
+# si se proporciona una foto, actualizarla
+    if "foto" in update_data:
+        update_data["foto"] = usuario.foto
+
+
     usuario_ref.update(update_data)  # actualizar el documento actual
     return {"message": "usuario actualizado correctamente", "actualizado": update_data}
 
@@ -196,10 +214,10 @@ def eliminar_usuario(documento_identidad: str):
     usuario_ref.delete()
     return {"message": "usuario eliminado correctamente"}
 
-# endpoint para buscar usuarios por email (búsqueda parcial)
+# endpoint para buscar usuarios por email (busqueda parcial)
 @app.get("/usuarios/email/{email}", response_model=List[Usuario])
 def buscar_por_email(email: str):
-    # convertir el email recibido a minúsculas
+    # convertir el email recibido a minusculas
     email = email.lower()
 
     try:
@@ -257,10 +275,10 @@ def buscar_por_nombre(nombre: str):
         # manejar errores inesperados
         raise HTTPException(status_code=500, detail="error interno del servidor")
 
-# endpoint para buscar usuarios por documento de identidad (búsqueda parcial)
+# endpoint para buscar usuarios por documento de identidad (busqueda parcial)
 @app.get("/usuarios/documento/{documento_identidad}", response_model=List[Usuario])
 def buscar_por_documento(documento_identidad: str):
-    # convertir el documento de identidad recibido a mayúsculas
+    # convertir el documento de identidad recibido a mayusculas
     documento_identidad = documento_identidad.upper()
 
     try:
@@ -305,6 +323,109 @@ def obtener_todos_los_usuarios():
         raise HTTPException(status_code=404, detail="no hay usuarios registrados")
 
     return usuarios
+
+#endpoint para subir imagenes
+@app.post("/usuarios/{documento_identidad}/foto")
+async def subir_foto(documento_identidad: str, file: UploadFile = File(...)):
+    usuario_ref = db.collection("usuarios").document(documento_identidad)
+
+    # Verificar si el usuario existe
+    if not usuario_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # Validar que solo se haya enviado un archivo
+    if not file:
+        raise HTTPException(status_code=400, detail="No se ha enviado ningún archivo")
+    if isinstance(file, list):
+        raise HTTPException(status_code=400, detail="Solo se permite subir un archivo a la vez")
+
+    # Llamar al endpoint para obtener la foto actual del usuario
+    try:
+        foto_actual = obtener_foto(documento_identidad)["foto"]  # Reutilizamos el endpoint
+    except HTTPException as e:
+        if e.status_code == 404:
+            foto_actual = None  # El usuario no tiene foto
+        else:
+            raise e  # Relanzar otros errores
+
+    # especificar el nombre del bucket explícitamente
+    bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")  # Reemplaza con tu bucket
+
+    # eliminar la foto anterior si existe
+    if foto_actual:
+        blob_anterior = bucket.blob("/".join(foto_actual.split("/")[-2:]))  # Extraer carpeta y nombre del archivo
+        if blob_anterior.exists():
+            blob_anterior.delete()
+
+    # validar el tipo de archivo (solo imagenes permitidas)
+    if file.content_type not in ["image/jpeg", "image/png"]:
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos JPEG o PNG")
+
+    # subir la nueva foto
+    blob = bucket.blob(f"usuarios/{documento_identidad}_{file.filename}")
+    try:
+        blob.upload_from_file(file.file, content_type=file.content_type)
+        blob.make_public()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al subir la foto: {str(e)}")
+
+    #hacer que el archivo sea público y obtener la URL
+    public_url = blob.public_url
+
+    # actualizar el campo foto del usuario con la nueva URL publica
+    usuario_ref.update({"foto": public_url})
+
+    return {"message": "Foto subida correctamente", "foto": public_url}
+
+
+# endpoint para borrar la foto de un usuario
+@app.delete("/usuarios/{documento_identidad}/foto", response_model=dict)
+def borrar_foto(documento_identidad: str):
+    usuario_ref = db.collection("usuarios").document(documento_identidad)
+
+    # verificar si el usuario existe
+    if not usuario_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    # obtener la URL de la foto actual
+    usuario_data = usuario_ref.get().to_dict()
+    foto_actual = usuario_data.get("foto")
+
+    if not foto_actual:
+        raise HTTPException(status_code=404, detail="Este usuario no tiene foto para borrar")
+
+    # extraer el nombre del archivo del path completo
+    bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")  # Reemplaza con tu bucket
+    blob_name = "/".join(foto_actual.split("/")[-2:])  # Extraer la carpeta y el nombre del archivo
+    blob = bucket.blob(blob_name)
+
+    # verificar si el archivo existe antes de intentar eliminarlo
+    if not blob.exists():
+        raise HTTPException(status_code=404, detail="El archivo no existe en el bucket")
+
+    # Eliminar el archivo del bucket
+    blob.delete()
+
+    # Actualizar el campo foto en Firestore
+    usuario_ref.update({"foto": None})
+
+    return {"message": "Foto borrada correctamente"}
+
+#endpoint para obtener la foto de un usuario
+@app.get("/usuarios/{documento_identidad}/foto")
+def obtener_foto(documento_identidad: str):
+    usuario_ref = db.collection("usuarios").document(documento_identidad)
+
+    if not usuario_ref.get().exists:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+    usuario_data = usuario_ref.get().to_dict()
+    foto = usuario_data.get("foto")
+
+    if not foto:
+        raise HTTPException(status_code=404, detail="Este usuario no tiene foto")
+
+    return {"foto": foto}
 
 # mensaje de bienvenida en la raiz
 @app.get("/")
