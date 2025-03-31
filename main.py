@@ -1,7 +1,7 @@
 import os
 import json
 import base64
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Form, File, UploadFile
 from config import db  # Importamos la conexion a Firestore desde config.py
 from pydantic import BaseModel, EmailStr, field_validator
 from datetime import date, datetime
@@ -9,7 +9,7 @@ from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi import Request, File, UploadFile
+from fastapi import Request
 from fastapi.staticfiles import StaticFiles
 from firebase_admin import storage  # Solo importa storage si lo necesitas
 
@@ -87,48 +87,41 @@ class UsuarioUpdate(BaseModel):
                 raise ValueError("la fecha de nacimiento no puede ser hoy ni en el futuro")
         return fecha
 
-# endpoint para registrar un nuevo usuario
+# el endpoint de registro
 @app.post("/usuarios", response_model=dict)
-def registrar_usuario(usuario: Usuario):
-    # convertir el documento de identidad a mayusculas
-    usuario.documento_identidad = usuario.documento_identidad.upper()
+async def registrar_usuario(usuario: Usuario):
+    try:
+        # Convertir el documento de identidad a mayúsculas
+        usuario.documento_identidad = usuario.documento_identidad.upper()
+        
+        usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
-    usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
+        # Verificar si el usuario ya existe
+        if usuario_ref.get().exists:
+            raise HTTPException(status_code=400, detail="Este documento de identidad ya ha sido registrado")
 
-    # verificar si el usuario ya existe por documento de identidad
-    if usuario_ref.get().exists:
-        raise HTTPException(status_code=400, detail="Este documento de identidad ya ha sido registrado")
+        # Verificar si el email ya existe
+        email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
+        if email_ref:
+            raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
 
-    # verificar si el email ya existe
-    email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
-    if email_ref:
-        raise HTTPException(status_code=400, detail="Este email ya ha sido registrado")
+        # Preparar los datos del usuario
+        usuario_dict = usuario.model_dump()
+        usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
+        usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
+        usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
+        usuario_dict["email"] = usuario.email.lower()
+        usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
 
-    # convertir la fecha a string porque firestore no admite el tipo date
-    usuario_dict = usuario.model_dump()
-    usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
+        # Guardar en Firestore
+        usuario_ref.set(usuario_dict)
 
-    # guardar el nombre normalizado (sin acentos y en minusculas) para mejorar busquedas
-    usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
+        return {"message": "Usuario registrado correctamente", "usuario": usuario_dict}
 
-    # guardar tambien el nombre en minusculas para consultas exactas sin mayusculas
-    usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
-
-    # almacenar el email siempre en minusculas
-    usuario_dict["email"] = usuario.email.lower()
-
-    # almacenar el documento de identidad siempre en mayusculas
-    usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
-
-    # si se proporciona una foto, almacenarla
-    if usuario.foto:
-        usuario_dict["foto"] = usuario.foto
-
-
-    # guardar en firestore
-    usuario_ref.set(usuario_dict)
-
-    return {"message": "usuario registrado correctamente", "usuario": usuario_dict}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
 
 # endpoint para obtener un usuario por su documento de identidad
 @app.get("/usuarios/{documento_identidad}", response_model=Usuario)
@@ -368,7 +361,7 @@ async def subir_foto(documento_identidad: str, file: UploadFile = File(...)):
             blob_anterior.delete()
 
     # validar el tipo de archivo (solo imágenes permitidas)
-    if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image/heic", "image/heif"]:
+    if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image.heic", "image.heif"]:
         raise HTTPException(status_code=400, detail="Solo se permiten archivos PNG, JPG, JPEG, HEIC o HEIF")
 
     # subir la nueva foto
