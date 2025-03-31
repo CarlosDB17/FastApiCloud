@@ -357,9 +357,9 @@ async def subir_foto(documento_identidad: str, file: UploadFile = File(...)):
         if blob_anterior.exists():
             blob_anterior.delete()
 
-    # validar el tipo de archivo (solo imagenes permitidas)
-    if file.content_type not in ["image/jpeg", "image/png"]:
-        raise HTTPException(status_code=400, detail="Solo se permiten archivos JPEG o PNG")
+    # validar el tipo de archivo (solo imágenes permitidas)
+    if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image/heic", "image/heif"]:
+        raise HTTPException(status_code=400, detail="Solo se permiten archivos PNG, JPG, JPEG, HEIC o HEIF")
 
     # subir la nueva foto
     blob = bucket.blob(f"usuarios/{documento_identidad}_{file.filename}")
