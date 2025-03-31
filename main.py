@@ -208,11 +208,21 @@ def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate)
 def eliminar_usuario(documento_identidad: str):
     usuario_ref = db.collection("usuarios").document(documento_identidad)
 
+    # Verificar si el usuario existe
     if not usuario_ref.get().exists:
-        raise HTTPException(status_code=404, detail="usuario no encontrado")
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
 
+    # Llamar al endpoint para borrar la foto del usuario
+    try:
+        borrar_foto(documento_identidad)
+    except HTTPException as e:
+        if e.status_code != 404:  # Ignorar si no tiene foto, pero relanzar otros errores
+            raise e
+
+    # Eliminar el documento del usuario en Firestore
     usuario_ref.delete()
-    return {"message": "usuario eliminado correctamente"}
+
+    return {"message": "Usuario y su foto eliminados correctamente"}
 
 # endpoint para buscar usuarios por email (busqueda parcial)
 @app.get("/usuarios/email/{email}", response_model=List[Usuario])
