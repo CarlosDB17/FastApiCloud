@@ -43,7 +43,7 @@ class Usuario(BaseModel):
     email: EmailStr
     documento_identidad: str
     fecha_nacimiento: date
-    foto: Optional[str] = None  # Nuevo campo para almacenar la URL o nombre del archivo de la foto
+    foto: Optional[str] = None  # nuevo campo para almacenar la URL o nombre del archivo de la foto
 
     @field_validator("documento_identidad")
     def validar_documento_identidad(cls, documento_identidad):
@@ -217,44 +217,38 @@ def eliminar_usuario(documento_identidad: str):
 
     return {"message": "Usuario y su foto eliminados correctamente"}
 
-# endpoint para buscar usuarios por email (busqueda parcial)
-@app.get("/usuarios/email/{email}", response_model=List[Usuario])
-def buscar_por_email(email: str):
-    # convertir el email recibido a minusculas
+# endpoint para buscar usuarios por email (búsqueda parcial)
+@app.get("/usuarios/email/{email}", response_model=dict)
+def buscar_por_email(email: str, skip: int = 0, limit: int = 3):
     email = email.lower()
+    usuarios_ref = db.collection("usuarios").stream()
+    usuarios = []
 
-    try:
-        # buscar usuarios cuyo email contenga el valor buscado
-        usuarios_ref = db.collection("usuarios").stream()
-        usuarios = []
+    for user in usuarios_ref:
+        user_data = user.to_dict()
+        user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
+        if email in user_data.get("email", ""):
+            usuarios.append(Usuario(**user_data))
 
-        for user in usuarios_ref:
-            user_data = user.to_dict()
-            user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
+    if not usuarios:
+        raise HTTPException(status_code=404, detail="No se encontraron usuarios con ese email")
 
-            # comparar si el email contiene el valor buscado
-            if email in user_data.get("email", ""):
-                usuarios.append(Usuario(**user_data))
+    # Calcular el total de usuarios encontrados
+    total = len(usuarios)
 
-        if not usuarios:
-            raise HTTPException(status_code=404, detail="no se encontraron usuarios con ese email")
+    # Aplicar paginación
+    paginados = usuarios[skip : skip + limit]
 
-        return usuarios
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail="error interno del servidor")
+    return {"usuarios": paginados, "total": total}
 
 # endpoint para buscar usuarios por nombre sin importar mayusculas ni acentos
-@app.get("/usuarios/nombre/{nombre}", response_model=List[Usuario])
-def buscar_por_nombre(nombre: str):
+@app.get("/usuarios/nombre/{nombre}", response_model=dict)
+def buscar_por_nombre(nombre: str, skip: int = 0, limit: int = 3):
     nombre_normalizado = normalizar_texto(nombre)
 
     try:
         # buscar usuarios cuyo nombre normalizado contenga la palabra clave
-        usuarios_ref = (
-            db.collection("usuarios")
-            .stream()
-        )
+        usuarios_ref = db.collection("usuarios").stream()
 
         usuarios = []
         for user in usuarios_ref:
@@ -268,7 +262,13 @@ def buscar_por_nombre(nombre: str):
         if not usuarios:
             raise HTTPException(status_code=404, detail="no se encontraron usuarios con ese nombre")
 
-        return usuarios
+        # Calcular el total de usuarios encontrados
+        total = len(usuarios)
+
+        # Aplicar paginación
+        paginados = usuarios[skip : skip + limit]
+
+        return {"usuarios": paginados, "total": total}
 
     except HTTPException as http_exc:
         # relanzar excepciones http ya controladas
@@ -279,8 +279,8 @@ def buscar_por_nombre(nombre: str):
         raise HTTPException(status_code=500, detail="error interno del servidor")
 
 # endpoint para buscar usuarios por documento de identidad (busqueda parcial)
-@app.get("/usuarios/documento/{documento_identidad}", response_model=List[Usuario])
-def buscar_por_documento(documento_identidad: str):
+@app.get("/usuarios/documento/{documento_identidad}", response_model=dict)
+def buscar_por_documento(documento_identidad: str, skip: int = 0, limit: int = 3):
     # convertir el documento de identidad recibido a mayusculas
     documento_identidad = documento_identidad.upper()
 
@@ -301,7 +301,13 @@ def buscar_por_documento(documento_identidad: str):
         if not usuarios:
             raise HTTPException(status_code=404, detail="No se encontraron usuarios con ese documento de identidad")
 
-        return usuarios
+        # Calcular el total de usuarios encontrados
+        total = len(usuarios)
+
+        # Aplicar paginación
+        paginados = usuarios[skip : skip + limit]
+
+        return {"usuarios": paginados, "total": total}
 
     except HTTPException as http_exc:
         # relanzar excepciones HTTP ya controladas
@@ -311,9 +317,9 @@ def buscar_por_documento(documento_identidad: str):
         # manejar errores inesperados
         raise HTTPException(status_code=500, detail="Error interno del servidor")
 
-# endpoint para obtener todos los usuarios
-@app.get("/usuarios", response_model=List[Usuario])
-def obtener_todos_los_usuarios():
+# endpoint para obtener todos los usuarios con paginación y total
+@app.get("/usuarios", response_model=dict)
+def obtener_todos_los_usuarios(skip: int = 0, limit: int = 3):
     usuarios_ref = db.collection("usuarios").stream()
     usuarios = []
 
@@ -323,9 +329,15 @@ def obtener_todos_los_usuarios():
         usuarios.append(Usuario(**user_data))
 
     if not usuarios:
-        raise HTTPException(status_code=404, detail="no hay usuarios registrados")
+        raise HTTPException(status_code=404, detail="No hay usuarios registrados")
 
-    return usuarios
+    # Calcular el total de usuarios
+    total = len(usuarios)
+
+    # Aplicar paginación
+    paginados = usuarios[skip : skip + limit]
+
+    return {"usuarios": paginados, "total": total}
 
 #endpoint para subir imagenes
 @app.post("/usuarios/{documento_identidad}/foto")
@@ -430,6 +442,33 @@ def obtener_foto(documento_identidad: str):
 
     return {"foto": foto}
 
+
+# endpoint para buscar un usuario por email exacto
+@app.get("/usuarios/email-exacto/{email}", response_model=Usuario)
+def buscar_por_email_exacto(email: str):
+    email = email.lower()
+    usuarios_ref = db.collection("usuarios").where("email", "==", email).get()
+
+    if not usuarios_ref:
+        raise HTTPException(status_code=404, detail="No se encontró un usuario con ese email")
+
+    usuario_data = usuarios_ref[0].to_dict()
+    usuario_data["fecha_nacimiento"] = date.fromisoformat(usuario_data["fecha_nacimiento"])
+    return Usuario(**usuario_data)
+
+# endpoint para buscar un usuario por documento exacto
+@app.get("/usuarios/documento-exacto/{documento_identidad}", response_model=Usuario)
+def buscar_por_documento_exacto(documento_identidad: str):
+    documento_identidad = documento_identidad.upper()
+    usuario_ref = db.collection("usuarios").document(documento_identidad).get()
+
+    if not usuario_ref.exists:
+        raise HTTPException(status_code=404, detail="No se encontró un usuario con ese documento de identidad")
+
+    usuario_data = usuario_ref.to_dict()
+    usuario_data["fecha_nacimiento"] = date.fromisoformat(usuario_data["fecha_nacimiento"])
+    return Usuario(**usuario_data)
+
 # mensaje de bienvenida en la raiz
 @app.get("/")
 def raiz():
@@ -446,12 +485,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
         # personalizar el mensaje para el campo "email"
         if campo == "email":
-            mensajes.append("error en el campo email: valor no valido. asegurate de escribir el email bien.")
+            mensajes.append("Error en el campo email: valor no válido. Asegurate de escribir el email bien.")
         # personalizar el mensaje para el campo "fecha_nacimiento"
         elif campo == "fecha_nacimiento":
-            mensajes.append("error en el campo fecha de nacimiento: la fecha no puede ser hoy ni en el futuro.")
+            mensajes.append("Error en el campo fecha de nacimiento: la fecha no puede ser hoy ni en el futuro.")
         else:
-            mensajes.append(f"error en '{campo}': {mensaje}")
+            mensajes.append(f"Error en '{campo}': {mensaje}")
 
     return JSONResponse(
         status_code=422,
