@@ -319,6 +319,57 @@ def buscar_por_documento(documento_identidad: str, skip: int = 0, limit: int = 3
     except Exception as e:
         # manejar errores inesperados
         raise HTTPException(status_code=500, detail="Error interno del servidor")
+    
+#end point para buscar usuarios por varios criterios (documento, nombre y email)
+@app.get("/usuarios/buscar/{valor}", response_model=dict)
+def buscar_usuarios_por_ruta(
+    valor: str,
+    skip: int = 0,
+    limit: int = 3
+):
+    try:
+        usuarios_ref = db.collection("usuarios").stream()
+        usuarios = []
+
+        for user in usuarios_ref:
+            user_data = user.to_dict()
+            user_data["fecha_nacimiento"] = date.fromisoformat(user_data["fecha_nacimiento"])
+
+            # Filtrar por documento de identidad
+            if valor.upper() in user_data.get("documento_identidad", ""):
+                usuarios.append(Usuario(**user_data))
+                continue
+
+            # Filtrar por nombre normalizado
+            if normalizar_texto(valor) in user_data.get("nombre_normalizado", ""):
+                usuarios.append(Usuario(**user_data))
+                continue
+
+            # Filtrar por email
+            if valor.lower() in user_data.get("email", ""):
+                usuarios.append(Usuario(**user_data))
+                continue
+
+        # Si no se encontraron usuarios, lanzar un error 404
+        if not usuarios:
+            raise HTTPException(status_code=404, detail="No se encontraron usuarios con el valor proporcionado")
+
+        # Calcular el total de usuarios encontrados
+        total = len(usuarios)
+
+        # Aplicar paginación
+        paginados = usuarios[skip : skip + limit]
+
+        return {"usuarios": paginados, "total": total}
+
+    except HTTPException as http_exc:
+        # Relanzar excepciones HTTP ya controladas
+        raise http_exc
+
+    except Exception as e:
+        # Manejar errores inesperados
+        raise HTTPException(status_code=500, detail=f"Error interno del servidor: {str(e)}")
+    
 
 # endpoint para obtener todos los usuarios con paginación y total
 @app.get("/usuarios", response_model=dict)
