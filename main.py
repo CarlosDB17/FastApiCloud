@@ -1,6 +1,9 @@
 import os
 import json
 import base64
+import csv
+from io import StringIO
+from fastapi import UploadFile, File, Form, HTTPException
 from fastapi import FastAPI, HTTPException, Query, Form, File, UploadFile
 from config import db  # Importamos la conexion a Firestore desde config.py
 from pydantic import BaseModel, EmailStr, field_validator
@@ -9,7 +12,7 @@ from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from fastapi import Request
+from fastapi import Request, Body
 from fastapi.staticfiles import StaticFiles
 from firebase_admin import storage  # Solo importa storage si lo necesitas
 
@@ -331,10 +334,10 @@ def obtener_todos_los_usuarios(skip: int = 0, limit: int = 3):
     if not usuarios:
         raise HTTPException(status_code=404, detail="No hay usuarios registrados")
 
-    # Calcular el total de usuarios
+    # calcular el total de usuarios
     total = len(usuarios)
 
-    # Aplicar paginación
+    # aplicar paginación
     paginados = usuarios[skip : skip + limit]
 
     return {"usuarios": paginados, "total": total}
@@ -342,55 +345,92 @@ def obtener_todos_los_usuarios(skip: int = 0, limit: int = 3):
 #endpoint para subir imagenes
 @app.post("/usuarios/{documento_identidad}/foto")
 async def subir_foto(documento_identidad: str, file: UploadFile = File(...)):
-    usuario_ref = db.collection("usuarios").document(documento_identidad)
-
-    # Verificar si el usuario existe
-    if not usuario_ref.get().exists:
-        raise HTTPException(status_code=404, detail="Usuario no encontrado")
-
-    # Validar que solo se haya enviado un archivo
-    if not file:
-        raise HTTPException(status_code=400, detail="No se ha enviado ningún archivo")
-    if isinstance(file, list):
-        raise HTTPException(status_code=400, detail="Solo se permite subir un archivo a la vez")
-
-    # Llamar al endpoint para obtener la foto actual del usuario
     try:
-        foto_actual = obtener_foto(documento_identidad)["foto"]  # Reutilizamos el endpoint
+        usuario_ref = db.collection("usuarios").document(documento_identidad)
+
+        # Verificar si el usuario existe
+        if not usuario_ref.get().exists:
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+
+        # Validar que solo se haya enviado un archivo
+        if not file:
+            raise HTTPException(status_code=400, detail="No se ha enviado ningún archivo")
+
+        # Verificar el content-type del archivo
+        content_type = file.content_type
+        print(f"Content-Type recibido: {content_type}")  # Log para depuración
+        
+        # Lista completa de tipos MIME de imágenes permitidos (corregido)
+        tipos_permitidos = [
+            "image/jpeg", "image/png", "image/jpg", 
+            "image/heic", "image/heif", "image/webp",
+            # Android puede enviar variantes
+            "application/octet-stream"  # Android a veces usa esto para archivos
+        ]
+        
+        if content_type not in tipos_permitidos:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Tipo de archivo no permitido: {content_type}. Solo se permiten PNG, JPG, JPEG, HEIC, HEIF o WEBP"
+            )
+
+        # Intentar leer los primeros bytes para verificar si es una imagen real
+        try:
+            content = await file.read(1024)  # Leer solo los primeros bytes
+            file.file.seek(0)  # Regresar al inicio del archivo
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"No se pudo leer el archivo: {str(e)}")
+
+        # Llamar al endpoint para obtener la foto actual del usuario
+        try:
+            foto_actual = obtener_foto(documento_identidad)["foto"]
+        except HTTPException as e:
+            if e.status_code == 404:
+                foto_actual = None  # El usuario no tiene foto
+            else:
+                raise e  # Relanzar otros errores
+
+        # Especificar el nombre del bucket explícitamente
+        bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")
+
+        # Eliminar la foto anterior si existe
+        if foto_actual:
+            try:
+                blob_anterior = bucket.blob("/".join(foto_actual.split("/")[-2:]))
+                if blob_anterior.exists():
+                    blob_anterior.delete()
+            except Exception as e:
+                print(f"Error al eliminar foto anterior: {str(e)}")  # Log, pero no interrumpir
+
+        # Generar un nombre seguro para el archivo (evitar caracteres especiales)
+        import time
+        safe_filename = f"{documento_identidad}_{int(time.time())}.jpg"
+        blob = bucket.blob(f"usuarios/{safe_filename}")
+        
+        # Subir la nueva foto
+        try:
+            blob.upload_from_file(file.file, content_type=file.content_type)
+            blob.make_public()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error al subir la foto: {str(e)}")
+
+        # Hacer que el archivo sea público y obtener la URL
+        public_url = blob.public_url
+
+        # Actualizar el campo foto del usuario con la nueva URL pública
+        usuario_ref.update({"foto": public_url})
+
+        return {"message": "Foto subida correctamente", "foto": public_url}
+        
     except HTTPException as e:
-        if e.status_code == 404:
-            foto_actual = None  # El usuario no tiene foto
-        else:
-            raise e  # Relanzar otros errores
-
-    # especificar el nombre del bucket explícitamente
-    bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")  # Reemplaza con tu bucket
-
-    # eliminar la foto anterior si existe
-    if foto_actual:
-        blob_anterior = bucket.blob("/".join(foto_actual.split("/")[-2:]))  # Extraer carpeta y nombre del archivo
-        if blob_anterior.exists():
-            blob_anterior.delete()
-
-    # validar el tipo de archivo (solo imágenes permitidas)
-    if file.content_type not in ["image/jpeg", "image/png", "image/jpg", "image.heic", "image.heif"]:
-        raise HTTPException(status_code=400, detail="Solo se permiten archivos PNG, JPG, JPEG, HEIC o HEIF")
-
-    # subir la nueva foto
-    blob = bucket.blob(f"usuarios/{documento_identidad}_{file.filename}")
-    try:
-        blob.upload_from_file(file.file, content_type=file.content_type)
-        blob.make_public()
+        # Relanzar excepciones HTTP
+        raise e
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error al subir la foto: {str(e)}")
-
-    #hacer que el archivo sea público y obtener la URL
-    public_url = blob.public_url
-
-    # actualizar el campo foto del usuario con la nueva URL publica
-    usuario_ref.update({"foto": public_url})
-
-    return {"message": "Foto subida correctamente", "foto": public_url}
+        # Log detallado para depuración
+        import traceback
+        print(f"Error al subir foto: {str(e)}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error interno al subir la foto: {str(e)}")
 
 
 # endpoint para borrar la foto de un usuario
@@ -468,6 +508,98 @@ def buscar_por_documento_exacto(documento_identidad: str):
     usuario_data = usuario_ref.to_dict()
     usuario_data["fecha_nacimiento"] = date.fromisoformat(usuario_data["fecha_nacimiento"])
     return Usuario(**usuario_data)
+
+
+@app.post("/usuarios/multiples", response_model=dict)
+async def registrar_usuarios_multiples(usuarios: List[Usuario]):
+    resultados = []
+    for usuario in usuarios:
+        try:
+            usuario.documento_identidad = usuario.documento_identidad.upper()
+            usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
+
+            # Verificar si el usuario ya existe
+            if usuario_ref.get().exists:
+                resultados.append({"usuario": usuario.documento_identidad, "status": "ya registrado"})
+                continue
+
+            # Verificar si el email ya existe
+            email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
+            if email_ref:
+                resultados.append({"usuario": usuario.documento_identidad, "status": "email ya registrado"})
+                continue
+
+            # Preparar los datos del usuario
+            usuario_dict = usuario.model_dump()
+            usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
+            usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
+            usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
+            usuario_dict["email"] = usuario.email.lower()
+            usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+
+            # Guardar en Firestore
+            usuario_ref.set(usuario_dict)
+            resultados.append({"usuario": usuario.documento_identidad, "status": "registrado correctamente"})
+        except Exception as e:
+            resultados.append({"usuario": usuario.documento_identidad, "status": f"error: {str(e)}"})
+
+    return {"resultados": resultados}
+
+
+
+@app.post("/usuarios/csv", response_model=dict)
+async def registrar_usuarios_csv(file: UploadFile):
+    if file.content_type != "text/csv":
+        raise HTTPException(status_code=400, detail="El archivo debe ser un CSV")
+
+    resultados = []
+    try:
+        contenido = await file.read()
+        csv_data = StringIO(contenido.decode("utf-8"))
+        reader = csv.DictReader(csv_data)
+
+        for row in reader:
+            try:
+                usuario = Usuario(
+                    nombre=row["nombre"],
+                    email=row["email"],
+                    documento_identidad=row["documento_identidad"],
+                    fecha_nacimiento=row["fecha_nacimiento"],
+                )
+                usuario.documento_identidad = usuario.documento_identidad.upper()
+                usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
+
+                # Verificar si el usuario ya existe
+                if usuario_ref.get().exists:
+                    resultados.append({"usuario": usuario.documento_identidad, "status": "ya registrado"})
+                    continue
+
+                # Verificar si el email ya existe
+                email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
+                if email_ref:
+                    resultados.append({"usuario": usuario.documento_identidad, "status": "email ya registrado"})
+                    continue
+
+                # Preparar los datos del usuario
+                usuario_dict = usuario.model_dump()
+                usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
+                usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
+                usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
+                usuario_dict["email"] = usuario.email.lower()
+                usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+
+                # Guardar en Firestore
+                usuario_ref.set(usuario_dict)
+                resultados.append({"usuario": usuario.documento_identidad, "status": "registrado correctamente"})
+            except Exception as e:
+                resultados.append({"usuario": row.get("documento_identidad", "desconocido"), "status": f"error: {str(e)}"})
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error al procesar el archivo CSV: {str(e)}")
+
+    return {"resultados": resultados}
+
+
 
 # mensaje de bienvenida en la raiz
 @app.get("/")
