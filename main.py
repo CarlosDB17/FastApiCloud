@@ -144,59 +144,50 @@ def obtener_usuario(documento_identidad: str):
 # endpoint para actualizar un usuario por su documento de identidad
 @app.patch("/usuarios/{documento_identidad}", response_model=dict)
 def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate):
+    print(f"Documento actual recibido en la URL: {documento_identidad}")
+    print(f"Datos recibidos en el cuerpo: {usuario}")
+
     usuario_ref = db.collection("usuarios").document(documento_identidad)
 
     if not usuario_ref.get().exists:
+        print("Error: Usuario no encontrado")
         raise HTTPException(status_code=404, detail="usuario no encontrado")
 
-    # obtener los datos actuales del usuario
     usuario_actual = usuario_ref.get().to_dict()
+    print(f"Datos actuales del usuario: {usuario_actual}")
 
-    # verificar si se intenta actualizar el documento_identidad
     if usuario.documento_identidad and usuario.documento_identidad != documento_identidad:
-        # verificar si el nuevo documento_identidad ya existe
+        print(f"Intentando cambiar el documento_identidad de {documento_identidad} a {usuario.documento_identidad}")
         nuevo_usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
         if nuevo_usuario_ref.get().exists:
+            print("Error: El nuevo documento de identidad ya está registrado")
             raise HTTPException(status_code=400, detail="el nuevo documento de identidad ya esta registrado")
 
-        # crear un nuevo documento con el nuevo documento_identidad
         nuevo_usuario_data = {**usuario_actual, **usuario.model_dump(exclude_unset=True)}
         nuevo_usuario_data["documento_identidad"] = usuario.documento_identidad
+        print(f"Datos del nuevo usuario: {nuevo_usuario_data}")
 
-        # si se envia "nombre", actualizar tambien las versiones normalizadas
-        if "nombre" in nuevo_usuario_data:
-            nuevo_usuario_data["nombre_normalizado"] = normalizar_texto(nuevo_usuario_data["nombre"])
-            nuevo_usuario_data["nombre_minusculas"] = nuevo_usuario_data["nombre"].lower()
+        nuevo_usuario_ref.set(nuevo_usuario_data)
+        print("Nuevo usuario creado")
 
-        # si se envia "fecha_nacimiento", convertir a string si es un objeto date
-        if "fecha_nacimiento" in nuevo_usuario_data:
-            if isinstance(nuevo_usuario_data["fecha_nacimiento"], date):
-                nuevo_usuario_data["fecha_nacimiento"] = nuevo_usuario_data["fecha_nacimiento"].strftime("%Y-%m-%d")
+        usuario_ref.delete()
+        print("Usuario antiguo eliminado")
 
-        nuevo_usuario_ref.set(nuevo_usuario_data)  # crear el nuevo documento
-        usuario_ref.delete()  # eliminar el documento original
+        return {
+            "message": "usuario actualizado correctamente con nuevo documento de identidad",
+            "nuevo_documento_identidad": usuario.documento_identidad,
+        }
 
-        return {"message": "usuario actualizado correctamente con nuevo documento de identidad"}
-
-    # actualizar los datos del usuario actual
     update_data = usuario.model_dump(exclude_unset=True)
+    print(f"Datos a actualizar: {update_data}")
 
-    # si se envia "nombre", actualizar tambien las versiones normalizadas
-    if "nombre" in update_data:
-        update_data["nombre_normalizado"] = normalizar_texto(update_data["nombre"])
-        update_data["nombre_minusculas"] = update_data["nombre"].lower()
+    if not update_data:
+        print("Error: No se proporcionaron datos para actualizar")
+        raise HTTPException(status_code=400, detail="No se proporcionaron datos para actualizar.")
 
-    # si se envia "fecha_nacimiento", convertir a string si es un objeto date
-    if "fecha_nacimiento" in update_data:
-        if isinstance(update_data["fecha_nacimiento"], date):
-            update_data["fecha_nacimiento"] = update_data["fecha_nacimiento"].strftime("%Y-%m-%d")
+    usuario_ref.update(update_data)
+    print("Usuario actualizado correctamente")
 
-# si se proporciona una foto, actualizarla
-    if "foto" in update_data:
-        update_data["foto"] = usuario.foto
-
-
-    usuario_ref.update(update_data)  # actualizar el documento actual
     return {"message": "usuario actualizado correctamente", "actualizado": update_data}
 
 # endpoint para eliminar un usuario por su documento de identidad
