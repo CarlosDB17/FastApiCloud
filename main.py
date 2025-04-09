@@ -165,6 +165,11 @@ def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate)
 
         nuevo_usuario_data = {**usuario_actual, **usuario.model_dump(exclude_unset=True)}
         nuevo_usuario_data["documento_identidad"] = usuario.documento_identidad
+
+        # Convertir fecha_nacimiento a string si está presente
+        if "fecha_nacimiento" in nuevo_usuario_data and isinstance(nuevo_usuario_data["fecha_nacimiento"], date):
+            nuevo_usuario_data["fecha_nacimiento"] = nuevo_usuario_data["fecha_nacimiento"].strftime("%Y-%m-%d")
+
         print(f"Datos del nuevo usuario: {nuevo_usuario_data}")
 
         nuevo_usuario_ref.set(nuevo_usuario_data)
@@ -180,6 +185,10 @@ def actualizar_usuario_parcial(documento_identidad: str, usuario: UsuarioUpdate)
 
     update_data = usuario.model_dump(exclude_unset=True)
     print(f"Datos a actualizar: {update_data}")
+
+    # Convertir fecha_nacimiento a string si está presente
+    if "fecha_nacimiento" in update_data and isinstance(update_data["fecha_nacimiento"], date):
+        update_data["fecha_nacimiento"] = update_data["fecha_nacimiento"].strftime("%Y-%m-%d")
 
     if not update_data:
         print("Error: No se proporcionaron datos para actualizar")
