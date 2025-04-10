@@ -560,7 +560,7 @@ def buscar_por_documento_exacto(documento_identidad: str):
     usuario_data["fecha_nacimiento"] = date.fromisoformat(usuario_data["fecha_nacimiento"])
     return Usuario(**usuario_data)
 
-
+#endpoint para registrar varios usuarios a la vez
 @app.post("/usuarios/multiples", response_model=dict)
 async def registrar_usuarios_multiples(usuarios: List[Usuario]):
     resultados = []
@@ -597,7 +597,7 @@ async def registrar_usuarios_multiples(usuarios: List[Usuario]):
     return {"resultados": resultados}
 
 
-
+#endpoint para registrar usuarios desde un archivo CSV
 @app.post("/usuarios/csv", response_model=dict)
 async def registrar_usuarios_csv(file: UploadFile):
     if file.content_type != "text/csv":
