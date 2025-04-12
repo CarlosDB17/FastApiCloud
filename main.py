@@ -500,22 +500,30 @@ def borrar_foto(documento_identidad: str):
     if not foto_actual:
         raise HTTPException(status_code=404, detail="Este usuario no tiene foto para borrar")
 
-    # extraer el nombre del archivo del path completo
-    bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")  # Reemplaza con tu bucket
-    blob_name = "/".join(foto_actual.split("/")[-2:])  # Extraer la carpeta y el nombre del archivo
-    blob = bucket.blob(blob_name)
+    # Verificar si la URL parece ser de Firebase Storage
+    if "firebasestorage" in foto_actual:
+        try:
+            # extraer el nombre del archivo del path completo
+            bucket = storage.bucket("pf25-carlos-db.firebasestorage.app")
+            blob_name = "/".join(foto_actual.split("/")[-2:])  # Extraer la carpeta y el nombre del archivo
+            blob = bucket.blob(blob_name)
 
-    # verificar si el archivo existe antes de intentar eliminarlo
-    if not blob.exists():
-        raise HTTPException(status_code=404, detail="El archivo no existe en el bucket")
+            # verificar si el archivo existe antes de intentar eliminarlo
+            if blob.exists():
+                blob.delete()
+                print(f"Archivo {blob_name} eliminado correctamente del bucket")
+            else:
+                print(f"Advertencia: El archivo {blob_name} no existe en el bucket")
+        except Exception as e:
+            print(f"Error al intentar eliminar archivo del bucket: {str(e)}")
+            # Continuamos con la operación a pesar del error
+    else:
+        print(f"La URL {foto_actual} no parece ser de Firebase Storage")
 
-    # Eliminar el archivo del bucket
-    blob.delete()
-
-    # Actualizar el campo foto en Firestore
+    # Actualizar el campo foto en Firestore siempre, independientemente de si se pudo borrar el archivo
     usuario_ref.update({"foto": None})
 
-    return {"message": "Foto borrada correctamente"}
+    return {"message": "Campo de foto limpiado correctamente"}
 
 #endpoint para obtener la foto de un usuario
 @app.get("/usuarios/{documento_identidad}/foto")
@@ -587,6 +595,11 @@ async def registrar_usuarios_multiples(usuarios: List[Usuario]):
             usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
             usuario_dict["email"] = usuario.email.lower()
             usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+            
+            # Si se proporcionó una URL de foto, la mantenemos
+            # Esto permite que se puedan pasar URLs de fotos ya subidas a Firebase Storage
+            if usuario.foto:
+                usuario_dict["foto"] = usuario.foto
 
             # Guardar en Firestore
             usuario_ref.set(usuario_dict)
@@ -611,12 +624,19 @@ async def registrar_usuarios_csv(file: UploadFile):
 
         for row in reader:
             try:
-                usuario = Usuario(
-                    nombre=row["nombre"],
-                    email=row["email"],
-                    documento_identidad=row["documento_identidad"],
-                    fecha_nacimiento=row["fecha_nacimiento"],
-                )
+                # Crear usuario con o sin foto, dependiendo si existe en el CSV
+                usuario_params = {
+                    "nombre": row["nombre"],
+                    "email": row["email"],
+                    "documento_identidad": row["documento_identidad"],
+                    "fecha_nacimiento": row["fecha_nacimiento"]
+                }
+                
+                # Añadir foto si está presente en el CSV
+                if "foto" in row and row["foto"]:
+                    usuario_params["foto"] = row["foto"]
+                
+                usuario = Usuario(**usuario_params)
                 usuario.documento_identidad = usuario.documento_identidad.upper()
                 usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
