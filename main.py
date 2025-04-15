@@ -572,20 +572,68 @@ def buscar_por_documento_exacto(documento_identidad: str):
 @app.post("/usuarios/multiples", response_model=dict)
 async def registrar_usuarios_multiples(usuarios: List[Usuario]):
     resultados = []
+    usuarios_procesados = 0
+    usuarios_registrados = 0
+    usuarios_con_error = 0
+    
     for usuario in usuarios:
         try:
+            # Validación del documento de identidad
+            if not re.match(r"^[a-zA-Z0-9]{6,15}$", usuario.documento_identidad):
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "Error", 
+                    "mensaje": "El documento de identidad debe ser alfanumérico y tener entre 6 y 15 caracteres."
+                })
+                usuarios_con_error += 1
+                continue
+            
+            # Convertir a mayúsculas el documento de identidad
             usuario.documento_identidad = usuario.documento_identidad.upper()
             usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
             # Verificar si el usuario ya existe
             if usuario_ref.get().exists:
-                resultados.append({"usuario": usuario.documento_identidad, "status": "ya registrado"})
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "Error", 
+                    "mensaje": "El documento ya está registrado."
+                })
+                usuarios_con_error += 1
                 continue
 
+            # Validar formato de email y convertir a minúsculas
+            usuario.email = usuario.email.lower()
+            
             # Verificar si el email ya existe
-            email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
+            email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
             if email_ref:
-                resultados.append({"usuario": usuario.documento_identidad, "status": "email ya registrado"})
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "Error", 
+                    "mensaje": f"El email {usuario.email} ya está registrado con otro usuario."
+                })
+                usuarios_con_error += 1
+                continue
+            
+            # Validar fecha de nacimiento
+            if usuario.fecha_nacimiento >= date.today():
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "Error", 
+                    "mensaje": "La fecha de nacimiento no puede ser hoy ni en el futuro."
+                })
+                usuarios_con_error += 1
+                continue
+            
+            # Validar que el nombre no esté vacío
+            if not usuario.nombre or usuario.nombre.strip() == "":
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "Error", 
+                    "mensaje": "El nombre no puede estar vacío."
+                })
+                usuarios_con_error += 1
                 continue
 
             # Preparar los datos del usuario
@@ -593,22 +641,50 @@ async def registrar_usuarios_multiples(usuarios: List[Usuario]):
             usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
             usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
             usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
-            usuario_dict["email"] = usuario.email.lower()
-            usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+            usuario_dict["email"] = usuario.email
+            usuario_dict["documento_identidad"] = usuario.documento_identidad
             
             # Si se proporcionó una URL de foto, la mantenemos
-            # Esto permite que se puedan pasar URLs de fotos ya subidas a Firebase Storage
             if usuario.foto:
                 usuario_dict["foto"] = usuario.foto
 
             # Guardar en Firestore
             usuario_ref.set(usuario_dict)
-            resultados.append({"usuario": usuario.documento_identidad, "status": "registrado correctamente"})
+            resultados.append({
+                "usuario": usuario.documento_identidad, 
+                "status": "Éxito", 
+                "mensaje": "Usuario registrado correctamente."
+            })
+            usuarios_registrados += 1
+            
+        except ValueError as ve:
+            # Capturar errores de validación específicos
+            resultados.append({
+                "usuario": getattr(usuario, "documento_identidad", "desconocido"), 
+                "status": "Error", 
+                "mensaje": f"Error de validación: {str(ve)}"
+            })
+            usuarios_con_error += 1
         except Exception as e:
-            resultados.append({"usuario": usuario.documento_identidad, "status": f"error: {str(e)}"})
+            # Capturar otros errores inesperados
+            resultados.append({
+                "usuario": getattr(usuario, "documento_identidad", "desconocido"), 
+                "status": "Error", 
+                "mensaje": f"Error inesperado: {str(e)}"
+            })
+            usuarios_con_error += 1
+        
+        usuarios_procesados += 1
 
-    return {"resultados": resultados}
-
+    # Resumen de la operación
+    return {
+        "resultados": resultados,
+        "resumen": {
+            "total_procesados": usuarios_procesados,
+            "registrados_correctamente": usuarios_registrados,
+            "con_errores": usuarios_con_error
+        }
+    }
 
 #endpoint para registrar usuarios desde un archivo CSV
 @app.post("/usuarios/csv", response_model=dict)
@@ -617,13 +693,41 @@ async def registrar_usuarios_csv(file: UploadFile):
         raise HTTPException(status_code=400, detail="El archivo debe ser un CSV")
 
     resultados = []
+    usuarios_procesados = 0
+    usuarios_registrados = 0
+    usuarios_con_error = 0
+    
     try:
         contenido = await file.read()
         csv_data = StringIO(contenido.decode("utf-8"))
         reader = csv.DictReader(csv_data)
 
         for row in reader:
+            usuarios_procesados += 1
             try:
+                # Verificar que todos los campos requeridos estén presentes
+                campos_requeridos = ["nombre", "email", "documento_identidad", "fecha_nacimiento"]
+                campos_faltantes = [campo for campo in campos_requeridos if campo not in row or not row[campo]]
+                
+                if campos_faltantes:
+                    resultados.append({
+                        "usuario": row.get("documento_identidad", "desconocido"), 
+                        "status": "error", 
+                        "mensaje": f"Faltan campos requeridos: {', '.join(campos_faltantes)}"
+                    })
+                    usuarios_con_error += 1
+                    continue
+                
+                # Validar documento de identidad
+                if not re.match(r"^[a-zA-Z0-9]{6,15}$", row["documento_identidad"]):
+                    resultados.append({
+                        "usuario": row["documento_identidad"], 
+                        "status": "error", 
+                        "mensaje": "El documento de identidad debe ser alfanumérico y tener entre 6 y 15 caracteres"
+                    })
+                    usuarios_con_error += 1
+                    continue
+                
                 # Crear usuario con o sin foto, dependiendo si existe en el CSV
                 usuario_params = {
                     "nombre": row["nombre"],
@@ -636,19 +740,44 @@ async def registrar_usuarios_csv(file: UploadFile):
                 if "foto" in row and row["foto"]:
                     usuario_params["foto"] = row["foto"]
                 
-                usuario = Usuario(**usuario_params)
+                # Intentar crear el objeto Usuario (esto validará el email y la fecha)
+                try:
+                    usuario = Usuario(**usuario_params)
+                except ValueError as ve:
+                    resultados.append({
+                        "usuario": row["documento_identidad"], 
+                        "status": "error", 
+                        "mensaje": f"Error de validación: {str(ve)}"
+                    })
+                    usuarios_con_error += 1
+                    continue
+                
+                # Convertir a mayúsculas el documento de identidad
                 usuario.documento_identidad = usuario.documento_identidad.upper()
                 usuario_ref = db.collection("usuarios").document(usuario.documento_identidad)
 
                 # Verificar si el usuario ya existe
                 if usuario_ref.get().exists:
-                    resultados.append({"usuario": usuario.documento_identidad, "status": "ya registrado"})
+                    resultados.append({
+                        "usuario": usuario.documento_identidad, 
+                        "status": "error", 
+                        "mensaje": "El documento de identidad ya está registrado."
+                    })
+                    usuarios_con_error += 1
                     continue
 
+                # Validar formato de email y convertir a minúsculas
+                usuario.email = usuario.email.lower()
+                
                 # Verificar si el email ya existe
-                email_ref = db.collection("usuarios").where("email", "==", usuario.email.lower()).get()
+                email_ref = db.collection("usuarios").where("email", "==", usuario.email).get()
                 if email_ref:
-                    resultados.append({"usuario": usuario.documento_identidad, "status": "email ya registrado"})
+                    resultados.append({
+                        "usuario": usuario.documento_identidad, 
+                        "status": "error", 
+                        "mensaje": f"El email {usuario.email} ya está registrado con otro usuario."
+                    })
+                    usuarios_con_error += 1
                     continue
 
                 # Preparar los datos del usuario
@@ -656,21 +785,38 @@ async def registrar_usuarios_csv(file: UploadFile):
                 usuario_dict["fecha_nacimiento"] = usuario.fecha_nacimiento.strftime("%Y-%m-%d")
                 usuario_dict["nombre_normalizado"] = normalizar_texto(usuario.nombre)
                 usuario_dict["nombre_minusculas"] = usuario.nombre.lower()
-                usuario_dict["email"] = usuario.email.lower()
-                usuario_dict["documento_identidad"] = usuario.documento_identidad.upper()
+                usuario_dict["email"] = usuario.email
+                usuario_dict["documento_identidad"] = usuario.documento_identidad
 
                 # Guardar en Firestore
                 usuario_ref.set(usuario_dict)
-                resultados.append({"usuario": usuario.documento_identidad, "status": "registrado correctamente"})
+                resultados.append({
+                    "usuario": usuario.documento_identidad, 
+                    "status": "éxito", 
+                    "mensaje": "Usuario registrado correctamente"
+                })
+                usuarios_registrados += 1
+                
             except Exception as e:
-                resultados.append({"usuario": row.get("documento_identidad", "desconocido"), "status": f"error: {str(e)}"})
+                resultados.append({
+                    "usuario": row.get("documento_identidad", "desconocido"), 
+                    "status": "error", 
+                    "mensaje": f"Error inesperado: {str(e)}"
+                })
+                usuarios_con_error += 1
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error al procesar el archivo CSV: {str(e)}")
 
-    return {"resultados": resultados}
-
-
+    # Resumen de la operación
+    return {
+        "resultados": resultados,
+        "resumen": {
+            "total_procesados": usuarios_procesados,
+            "registrados_correctamente": usuarios_registrados,
+            "con_errores": usuarios_con_error
+        }
+    }
 
 # mensaje de bienvenida en la raiz
 @app.get("/")
